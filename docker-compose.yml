@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  video-engine:
+    build: .
+    container_name: autoshorts-video-engine
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount outputs, assets cache, fonts and music folders for persistence
+      - ./output:/app/output
+      - ./assets:/app/assets
+      - ./music:/app/music
+      - ./fonts:/app/fonts
+    env_file:
+      - .env
+    restart: always
