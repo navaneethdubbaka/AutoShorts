@@ -69,3 +69,4 @@ Thumbs.db
 # Project-specific ignores
 /temp/
 /output/
+/assets/
