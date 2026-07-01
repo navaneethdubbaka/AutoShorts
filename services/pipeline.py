@@ -39,28 +39,42 @@ def run_pipeline(job_id: str, payload: dict) -> dict:
     try:
         # --- STEP 1: TTS Generation per Scene ---
         logger.info("--- Step 1: Synthesizing TTS narration per scene ---")
+        
+        current_time = 0.0
         for i, scene in enumerate(request.scenes):
             scene_duration = scene.end - scene.start
-            total_duration = max(total_duration, scene.end)
             
             # Skip TTS if scene has no narration text
             if not scene.narration.strip():
                 # If no narration, generate silent wav for scene duration
-                logger.info(f"Scene {i} has empty narration. Generating silence.")
+                logger.info(f"Scene ID {scene.id} has empty narration. Generating silence.")
                 silent_wav = job_temp_dir / f"scene_{i}_silence.wav"
                 silence = AudioSegment.silent(duration=int(scene_duration * 1000), frame_rate=44100)
                 silence = silence.set_channels(1).set_sample_width(2)
                 silence.export(silent_wav, format="wav")
                 scene_wavs.append(silent_wav)
-                continue
+                actual_duration = scene_duration
+            else:
+                scene_wav_path = job_temp_dir / f"scene_{i}_narration.wav"
+                voice_id = request.voice or settings.elevenlabs_voice_id
+                tts_provider.synthesize(
+                    text=scene.narration,
+                    voice_id=voice_id,
+                    output_path=scene_wav_path
+                )
+                scene_wavs.append(scene_wav_path)
                 
-            scene_wav_path = job_temp_dir / f"scene_{i}_narration.wav"
-            tts_provider.synthesize(
-                text=scene.narration,
-                voice_id=request.voice,
-                output_path=scene_wav_path
-            )
-            scene_wavs.append(scene_wav_path)
+                # Measure actual duration of the generated audio file
+                audio_segment = AudioSegment.from_wav(str(scene_wav_path))
+                actual_duration = len(audio_segment) / 1000.0
+                
+            # Dynamically update scene timestamps to match the voice track
+            scene.start = current_time
+            scene.end = current_time + actual_duration
+            logger.info(f"Scene ID {scene.id} adjusted: start={scene.start:.2f}s, end={scene.end:.2f}s (duration={actual_duration:.2f}s)")
+            current_time = scene.end
+
+        total_duration = current_time
 
         # Concatenate scene narration audio files to create the master voice track
         logger.info("Concatenating scene audio tracks into master voice narration...")
@@ -85,6 +99,7 @@ def run_pipeline(job_id: str, payload: dict) -> dict:
         scene_effects = []
         scene_transitions = []
         
+        orientation = "landscape" if request.resolution == "1920x1080" else "portrait"
         for i, scene in enumerate(request.scenes):
             scene_duration = scene.end - scene.start
             scene_durations.append(scene_duration)
@@ -93,12 +108,23 @@ def run_pipeline(job_id: str, payload: dict) -> dict:
             
             # Fetch asset (video/image)
             asset_path = get_scene_asset(
-                keywords=scene.search_keywords,
+                search_query=scene.search_query,
+                asset_type=scene.asset_type,
                 duration=scene_duration,
-                scene_index=i,
-                job_id=job_id
+                scene_id=scene.id,
+                job_id=job_id,
+                orientation=orientation
             )
             scene_assets.append(asset_path)
+
+        # --- STEP 3b: Validate Stock Assets (Fail Fast) ---
+        logger.info("--- Step 3b: Validating downloaded assets ---")
+        for i, scene in enumerate(request.scenes):
+            asset_path = scene_assets[i]
+            if not asset_path.exists():
+                raise FileNotFoundError(f"Validation failed: Asset for Scene ID {scene.id} is missing at {asset_path}")
+            if asset_path.stat().st_size == 0:
+                raise ValueError(f"Validation failed: Asset file for Scene ID {scene.id} at {asset_path} is empty (0 bytes)")
 
         # --- STEP 4: Caption Generation (ASS subtitle file) ---
         logger.info("--- Step 4: Generating ASS captions file ---")

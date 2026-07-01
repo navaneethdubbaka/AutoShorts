@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = Field(default="", validation_alias="ELEVENLABS_API_KEY")
     elevenlabs_api_keys: str = Field(default="", validation_alias="ELEVENLABS_API_KEYS")
     elevenlabs_model_id: str = Field(default="eleven_flash_v2_5", validation_alias="ELEVENLABS_MODEL_ID")
+    elevenlabs_voice_id: str = Field(default="21m00Tcm4TlvDq8ikWAM", validation_alias="ELEVENLABS_VOICE_ID")
     pexels_api_key: str = Field(default="", validation_alias="PEXELS_API_KEY")
     pixabay_api_key: str = Field(default="", validation_alias="PIXABAY_API_KEY")
     api_key: str = Field(default="", validation_alias="API_KEY")  # Shared secret for API security

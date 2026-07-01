@@ -48,27 +48,31 @@ def generate_solid_color_video(color: str, duration: float, output_path: Path, r
         raise RuntimeError(f"Failed to generate solid fallback video: {e.stderr}")
 
 def get_scene_asset(
-    keywords: List[str], 
+    search_query: str, 
+    asset_type: str,
     duration: float, 
-    scene_index: int, 
+    scene_id: int, 
     job_id: str,
     orientation: str = "portrait"
 ) -> Path:
     """
-    Search, cache, and download stock asset for a scene.
+    Search, cache, and download stock asset (video or image) for a scene.
+    If image asset is requested, it is downloaded and converted to an MP4 video of the specified duration.
     Falls back sequentially: Pexels -> Pixabay -> Local Fallback files -> FFmpeg generated solid colors.
     """
     dest_dir = settings.assets_dir / job_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / f"scene_{scene_index}.mp4"
+    dest_path = dest_dir / f"scene_{scene_id}.mp4"
 
-    # 1. Prepare search query
-    query = " ".join(keywords).strip()
-    if not query:
-        query = "abstract background"
+    # 1. Prepare search query and cache key
+    raw_query = search_query.strip()
+    if not raw_query:
+        raw_query = "abstract background"
+        
+    cache_query_key = f"{asset_type}:{raw_query}"
 
     # 2. Check Cache
-    cached_results = asset_cache.get_search_results(query, orientation)
+    cached_results = asset_cache.get_search_results(cache_query_key, orientation)
     
     results = []
     if cached_results is not None:
@@ -76,44 +80,85 @@ def get_scene_asset(
     else:
         # Pexels search
         pexels = PexelsProvider()
-        results = pexels.search(query, orientation)
+        results = pexels.search(raw_query, orientation, asset_type)
         
         # Pixabay fallback search
         if not results:
             pixabay = PixabayProvider()
-            results = pixabay.search(query, orientation)
+            results = pixabay.search(raw_query, orientation, asset_type)
             
         # Save search results to cache
-        asset_cache.save_search_results(query, orientation, results)
+        asset_cache.save_search_results(cache_query_key, orientation, results)
 
     # 3. Download best result if available
     if results:
-        # Take the first video result
         best_result = results[0]
         url = best_result["url"]
         
         # Check if media is already cached
         cached_media = asset_cache.get_cached_media(url)
         if cached_media and cached_media.exists():
-            logger.info(f"Using cached video clip for scene {scene_index}")
-            shutil.copy(cached_media, dest_path)
-            return dest_path
+            logger.info(f"Using cached asset for scene {scene_id}")
+            if asset_type == "image":
+                # Convert the cached image to MP4
+                try:
+                    logger.info(f"Converting cached image to MP4 for scene {scene_id} ({duration}s)...")
+                    w_h = "1920x1080" if orientation == "landscape" else "1080x1920"
+                    res_arg = "1920:1080" if orientation == "landscape" else "1080:1920"
+                    vf_filter = f"scale={res_arg}:force_original_aspect_ratio=increase,crop={res_arg}"
+                    
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-loop", "1",
+                        "-i", str(cached_media),
+                        "-t", str(duration),
+                        "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p",
+                        "-vf", vf_filter,
+                        "-r", "30",
+                        str(dest_path)
+                    ]
+                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    return dest_path
+                except Exception as convert_err:
+                    logger.error(f"Failed to convert cached image to video: {convert_err}")
+            else:
+                shutil.copy(cached_media, dest_path)
+                return dest_path
             
         # Download and cache
-        temp_download = settings.temp_dir / f"download_{job_id}_{scene_index}.mp4"
+        suffix = ".jpg" if asset_type == "image" else ".mp4"
+        temp_download = settings.temp_dir / f"download_{job_id}_{scene_id}{suffix}"
         try:
-            # Pexels or Pixabay download (both can download standard HTTP links using requests)
             provider = PexelsProvider()  # Generic HTTP downloader works for both
             provider.download(url, temp_download)
             
             # Cache it
-            asset_cache.save_media(url, temp_download)
+            cached_media = asset_cache.save_media(url, temp_download)
             
-            # Copy to destination
-            shutil.copy(temp_download, dest_path)
+            if asset_type == "image":
+                logger.info(f"Converting downloaded image to MP4 for scene {scene_id} ({duration}s)...")
+                w_h = "1920x1080" if orientation == "landscape" else "1080x1920"
+                res_arg = "1920:1080" if orientation == "landscape" else "1080:1920"
+                vf_filter = f"scale={res_arg}:force_original_aspect_ratio=increase,crop={res_arg}"
+                
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-i", str(cached_media),
+                    "-t", str(duration),
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-vf", vf_filter,
+                    "-r", "30",
+                    str(dest_path)
+                ]
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+            else:
+                shutil.copy(cached_media, dest_path)
             return dest_path
         except Exception as e:
-            logger.error(f"Download failed for URL {url}: {e}. Trying other fallbacks...")
+            logger.error(f"Download or processing failed for URL {url}: {e}. Trying other fallbacks...")
         finally:
             if temp_download.exists():
                 os.remove(temp_download)
@@ -122,7 +167,6 @@ def get_scene_asset(
     fallback_pool_dir = settings.assets_dir / "fallback"
     fallback_pool_dir.mkdir(parents=True, exist_ok=True)
     
-    # Check if there are any MP4 files in fallback
     fallback_files = list(fallback_pool_dir.glob("*.mp4"))
     if fallback_files:
         selected_fallback = random.choice(fallback_files)
@@ -131,9 +175,10 @@ def get_scene_asset(
         return dest_path
 
     # 5. Last Resort Fallback: Generate solid pastel color MP4 using FFmpeg
-    color = PASTEL_COLORS[scene_index % len(PASTEL_COLORS)]
+    color = PASTEL_COLORS[scene_id % len(PASTEL_COLORS)]
+    target_res = "1920x1080" if orientation == "landscape" else "1080x1920"
     try:
-        generate_solid_color_video(color=color, duration=duration, output_path=dest_path)
+        generate_solid_color_video(color=color, duration=duration, output_path=dest_path, resolution=target_res)
         return dest_path
     except Exception as e:
         logger.error(f"Last resort color-generation fallback failed: {e}")

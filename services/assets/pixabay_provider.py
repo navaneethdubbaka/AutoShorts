@@ -11,9 +11,10 @@ logger = logging.getLogger("video_engine.assets.pixabay")
 class PixabayProvider(AssetProvider):
     def __init__(self):
         self.api_key = settings.pixabay_api_key
-        self.api_url = "https://pixabay.com/api/videos/"
+        self.api_url_video = "https://pixabay.com/api/videos/"
+        self.api_url_image = "https://pixabay.com/api/"
 
-    def search(self, query: str, orientation: str = "portrait") -> List[Dict[str, Any]]:
+    def search(self, query: str, orientation: str = "portrait", asset_type: str = "stock_video") -> List[Dict[str, Any]]:
         if not self.api_key:
             logger.warning("Pixabay API key not configured. Skipping search.")
             return []
@@ -23,10 +24,15 @@ class PixabayProvider(AssetProvider):
             "q": query,
             "per_page": 5
         }
+        if asset_type == "image":
+            params["image_type"] = "photo"
 
         try:
-            logger.info(f"Pixabay search: '{query}'")
-            response = requests.get(self.api_url, params=params, timeout=10)
+            logger.info(f"Pixabay search ({asset_type}): '{query}'")
+            if asset_type == "image":
+                response = requests.get(self.api_url_image, params=params, timeout=10)
+            else:
+                response = requests.get(self.api_url_video, params=params, timeout=10)
             
             if response.status_code == 400:
                 logger.error("Pixabay request error (400). Bad API key or params.")
@@ -39,30 +45,39 @@ class PixabayProvider(AssetProvider):
             hits = data.get("hits", [])
             results = []
 
-            for hit in hits:
-                videos_dict = hit.get("videos", {})
-                if not videos_dict:
-                    continue
+            if asset_type == "image":
+                for hit in hits:
+                    url = hit.get("largeImageURL") or hit.get("webformatURL")
+                    if url:
+                        results.append({
+                            "url": url,
+                            "id": str(hit.get("id")),
+                            "width": hit.get("imageWidth"),
+                            "height": hit.get("imageHeight"),
+                            "duration": 0.0
+                        })
+            else:
+                for hit in hits:
+                    videos_dict = hit.get("videos", {})
+                    if not videos_dict:
+                        continue
 
-                # Choose the best format. Pixabay provides 'large', 'medium', 'small', 'tiny'
-                # We prefer 'medium' or 'large'
-                best_video = None
-                for size in ["large", "medium", "small"]:
-                    size_data = videos_dict.get(size)
-                    if size_data and size_data.get("url"):
-                        best_video = size_data
-                        # If size is medium or large, break early (good balance of quality/file size)
-                        if size in ["large", "medium"]:
-                            break
+                    best_video = None
+                    for size in ["large", "medium", "small"]:
+                        size_data = videos_dict.get(size)
+                        if size_data and size_data.get("url"):
+                            best_video = size_data
+                            if size in ["large", "medium"]:
+                                break
 
-                if best_video:
-                    results.append({
-                        "url": best_video.get("url"),
-                        "id": str(hit.get("id")),
-                        "width": best_video.get("width"),
-                        "height": best_video.get("height"),
-                        "duration": hit.get("duration")
-                    })
+                    if best_video:
+                        results.append({
+                            "url": best_video.get("url"),
+                            "id": str(hit.get("id")),
+                            "width": best_video.get("width"),
+                            "height": best_video.get("height"),
+                            "duration": hit.get("duration")
+                        })
 
             logger.info(f"Pixabay returned {len(results)} search results.")
             return results

@@ -11,9 +11,10 @@ logger = logging.getLogger("video_engine.assets.pexels")
 class PexelsProvider(AssetProvider):
     def __init__(self):
         self.api_key = settings.pexels_api_key
-        self.api_url = "https://api.pexels.com/videos/search"
+        self.api_url_video = "https://api.pexels.com/videos/search"
+        self.api_url_image = "https://api.pexels.com/v1/search"
 
-    def search(self, query: str, orientation: str = "portrait") -> List[Dict[str, Any]]:
+    def search(self, query: str, orientation: str = "portrait", asset_type: str = "stock_video") -> List[Dict[str, Any]]:
         if not self.api_key:
             logger.warning("Pexels API key not configured. Skipping search.")
             return []
@@ -28,8 +29,12 @@ class PexelsProvider(AssetProvider):
         }
 
         try:
-            logger.info(f"Pexels search: '{query}' (orientation: {orientation})")
-            response = requests.get(self.api_url, headers=headers, params=params, timeout=10)
+            logger.info(f"Pexels search ({asset_type}): '{query}' (orientation: {orientation})")
+            
+            if asset_type == "image":
+                response = requests.get(self.api_url_image, headers=headers, params=params, timeout=10)
+            else:
+                response = requests.get(self.api_url_video, headers=headers, params=params, timeout=10)
             
             if response.status_code == 401:
                 logger.error("Pexels unauthorized. Invalid API key.")
@@ -42,46 +47,52 @@ class PexelsProvider(AssetProvider):
                 return []
 
             data = response.json()
-            videos = data.get("videos", [])
             results = []
 
-            for video in videos:
-                files = video.get("video_files", [])
-                if not files:
-                    continue
-
-                # Find the best quality mp4 link
-                # We prefer HD (typically 720p or 1080p) to keep download size reasonable on CPU
-                best_file = None
-                
-                # Sort files by resolution (height * width) descending
-                mp4_files = [f for f in files if f.get("file_type") == "video/mp4"]
-                mp4_files.sort(key=lambda f: (f.get("width", 0) or 0) * (f.get("height", 0) or 0), reverse=True)
-                
-                # We want something around 1080x1920 (if portrait) or 1920x1080 (if landscape)
-                # Avoid files that are too huge (e.g. 4K) or too tiny (e.g. 240p)
-                for f in mp4_files:
-                    link = f.get("link")
-                    if not link:
+            if asset_type == "image":
+                photos = data.get("photos", [])
+                for photo in photos:
+                    src = photo.get("src", {})
+                    # Prefer portrait for portrait, large2x/large/original as fallback
+                    url = src.get("portrait") or src.get("large2x") or src.get("large") or src.get("original")
+                    if url:
+                        results.append({
+                            "url": url,
+                            "id": str(photo.get("id")),
+                            "width": photo.get("width"),
+                            "height": photo.get("height"),
+                            "duration": 0.0
+                        })
+            else:
+                videos = data.get("videos", [])
+                for video in videos:
+                    files = video.get("video_files", [])
+                    if not files:
                         continue
-                    w, h = f.get("width", 0) or 0, f.get("height", 0) or 0
-                    
-                    # Ideal portrait: height close to 1080 or 1920
-                    # Ideal landscape: width close to 1080 or 1920
-                    best_file = f
-                    # Break early once we find a solid HD resolution (e.g. >= 720p)
-                    if min(w, h) >= 720 and max(w, h) <= 1920:
-                        best_file = f
-                        break
 
-                if best_file:
-                    results.append({
-                        "url": best_file.get("link"),
-                        "id": str(video.get("id")),
-                        "width": best_file.get("width"),
-                        "height": best_file.get("height"),
-                        "duration": video.get("duration")
-                    })
+                    best_file = None
+                    mp4_files = [f for f in files if f.get("file_type") == "video/mp4"]
+                    mp4_files.sort(key=lambda f: (f.get("width", 0) or 0) * (f.get("height", 0) or 0), reverse=True)
+                    
+                    for f in mp4_files:
+                        link = f.get("link")
+                        if not link:
+                            continue
+                        w, h = f.get("width", 0) or 0, f.get("height", 0) or 0
+                        
+                        best_file = f
+                        if min(w, h) >= 720 and max(w, h) <= 1920:
+                            best_file = f
+                            break
+
+                    if best_file:
+                        results.append({
+                            "url": best_file.get("link"),
+                            "id": str(video.get("id")),
+                            "width": best_file.get("width"),
+                            "height": best_file.get("height"),
+                            "duration": video.get("duration")
+                        })
 
             logger.info(f"Pexels returned {len(results)} search results.")
             return results
